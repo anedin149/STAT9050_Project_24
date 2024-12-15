@@ -1,0 +1,483 @@
+#1 
+# (a)
+#install.packages("survival")
+#install.packages("MASS")
+#install.packages("dplyr")
+rm(list=ls())
+library(survival)
+library(MASS)
+library(dplyr)
+
+n<- 30000
+beta1 <- log(2)
+beta2 <- log(2)
+beta3 <- -1
+
+set.seed(1026)
+
+generate_data <- function(n) {
+  Z <- mvrnorm(n, mu = c(0, 0), Sigma = matrix(c(1, 0.75, 0.75, 1), 2, 2))
+  Z1 <- Z[,1]
+  Z2 <- Z[,2]
+# Generating covariates: W1,W2  
+  
+  W1 <- rnorm(n)
+  W2 <- rbinom(n, 1, 0.5)
+  
+# Generating U & T
+  
+  u <- runif(n,0,1)
+  T <- (-log(1 - u) / (exp(beta1 * Z1 + beta2 * W1 + beta3 * W2) * 0.5))^(1 / 1.5)
+  
+  data.frame(T, Z1, Z2, W1, W2)
+}
+
+data <- generate_data(n)
+
+# Applying Cox model 
+
+cox_model <- coxph(Surv(T) ~ Z1 + W1 + W2, data = data)
+summary(cox_model)
+
+
+
+# (b) Repeat 100 times
+
+set.seed(1026)
+
+beta_estimates <- matrix(NA, nrow = 100, ncol = 3)
+se_estimates <- matrix(NA, nrow = 100, ncol = 3)
+
+for (i in 1:100) {
+  data <- generate_data(n)
+  cox_model <- coxph(Surv(T) ~ Z1 + W1 + W2, data = data)
+  beta_estimates[i,] <- summary(cox_model)$coef[, "coef"]
+  se_estimates[i,]<- summary(cox_model)$coef[, "se(coef)"]
+}
+
+
+
+# result
+
+beta_means <- colMeans(beta_estimates)
+beta_sd <- apply(beta_estimates, 2, sd)
+means_of_se <- colMeans(se_estimates)
+
+print(c(beta_means,means_of_se))
+
+list(
+  beta_means = beta_means,
+  true_beta = c(log(2),log(2),-1)
+)
+
+list(
+  means_of_se = means_of_se,
+  beta_sd = beta_sd
+)
+
+#(c)Generating right censoring times
+
+set.seed(1026)
+
+# setting
+
+n_large <- 1e6  
+
+censor_rates <- c(0.10, 0.30, 0.90, 0.95, 0.99)
+
+# generating T from Weibull
+
+generate_T <- function(n) {
+  (-log(runif(n)) / 0.5)^(1 / 1.5)
+}
+
+# Finding the values of the parameter
+estimate_censoring_param <- function(rate) {
+  T_large <- generate_T(n_large)
+  
+  censoring_rate <- function(param) {
+    C_large <- rexp(n_large, rate = param)
+    mean(T_large > C_large) - rate
+  }
+ 
+  param <- uniroot(censoring_rate, c(0.0001, 100))$root
+  return(param)
+}
+
+
+censor_params <- sapply(censor_rates, estimate_censoring_param)
+names(censor_params) <- paste0(censor_rates * 100, "%")
+print(censor_params)
+
+
+#(d)
+
+apply_censoring <- function(data, censor_param) {
+  C <- rexp(n, rate = censor_param)
+  X <- pmin(data$T, C)
+  delta <- as.numeric(data$T <= C)
+  data.frame(X, delta, data[, c("Z1", "Z2", "W1", "W2")])
+}
+
+# Repeat (b) 
+censored_results <- lapply(censor_params, function(param) {
+  beta_estimates_censored <- matrix(NA, nrow = 100, ncol = 3)
+  
+  for (i in 1:100) {
+    data <- generate_data(n)
+    censored_data <- apply_censoring(data, param)
+    cox_model <- coxph(Surv(X, delta) ~ Z1 + W1 + W2, data = censored_data)
+    beta_estimates_censored[i, ] <- c(coef(cox_model))
+  }
+  
+  list(
+    beta_means = colMeans(beta_estimates_censored),
+    beta_sd = apply(beta_estimates_censored, 2, sd)
+  )
+})
+
+censored_results
+
+
+
+#2
+
+#(a)case-cohort design
+
+set.seed(1026)
+
+n <- 30000
+
+censor_rate_0.99 <- 0.99
+param <- 16.15703772   # the 99% censoring rate
+
+# Generating T and C
+generate_data <- function(n) {
+  Z <- mvrnorm(n, mu = c(0, 0), Sigma = matrix(c(1, 0.75, 0.75, 1), 2, 2))
+  Z1 <- Z[,1]
+  Z2 <- Z[,2]
+  W1 <- rnorm(n)
+  W2 <- rbinom(n, 1, 0.5)
+  u <- runif(n)
+  T <- (-log(1 - u) / (exp(beta1 * Z1 + beta2 * W1 + beta3 * W2) * 0.5))^(1 / 1.5)
+  C <- rexp(n, rate = param)
+  X <- pmin(T, C)
+  delta <- as.numeric(T <= C)
+  data.frame(X, delta, Z1, Z2, W1, W2)
+}
+
+# Generating data
+
+full_data <- generate_data(n)
+
+case_cohort_sample <- function(data, subcohort_size = 100) {
+  cases <- data[data$delta == 1, ]
+  non_cases <- data[data$delta == 0, ]
+  subcohort <- non_cases[sample(1:nrow(non_cases), subcohort_size), ]
+
+  case_cohort <- rbind(cases, subcohort)
+  return(case_cohort)
+}
+
+# sampling 
+sample_data <- case_cohort_sample(full_data, subcohort_size = 100)
+dim(sample_data)
+
+
+
+
+num_failures <- nrow(sample_data[sample_data$delta == 1, ])
+total_sample_size <- nrow(sample_data)
+cat("Number of failures:", num_failures, "\n")
+cat("Case-cohort sample size:", total_sample_size, "\n")
+
+# (iii)
+apply_weights <- function(data, full_data, subcohort_size) {
+  nc <- nrow(full_data[full_data$delta == 0, ])
+  nc_tilde <- subcohort_size
+  
+  data$weight <- ifelse(data$delta == 1, 1, nc / nc_tilde)
+  
+  cox_model <- coxph(Surv(X, delta) ~ Z1 + W1 + W2, data = data, weights = data$weight)
+  return(summary(cox_model)$coef)
+}
+
+# Calculate the estimate of β 
+beta_estimates <- apply_weights(sample_data, full_data, subcohort_size = 100)
+print(beta_estimates)
+
+
+# (iv)
+failure_counts <- numeric(500)
+sample_sizes <- numeric(500)
+
+beta_results <- matrix(NA, nrow = 500, ncol = 3)
+
+for (i in 1:500) {
+  sample_data <- case_cohort_sample(full_data, subcohort_size = 100)
+  beta_estimates <- apply_weights(sample_data, full_data, subcohort_size = 100)
+  beta_results[i, ] <- beta_estimates[, 1]
+  failure_counts[i] <- sum(sample_data$delta == 1) 
+  sample_sizes[i] <- nrow(sample_data)
+}
+
+avg_failures <- mean(failure_counts)
+avg_sample_size <- mean(sample_sizes)
+
+cat("Average number of failures in 500 case-cohort samples:", avg_failures, "\n")
+cat("Average case-cohort sample size:", avg_sample_size, "\n")
+
+#(vi)
+# Calculate the esimate of β 
+
+beta_means <- colMeans(beta_results)
+beta_sds <- apply(beta_results, 2, sd)
+
+cat("Sample means of β estimates:", beta_means, "\n")
+cat("True means of β:",log(2),log(2),-1,"\n")
+
+cat("Sample sd of β estimates:", beta_sds, "\n")
+cat("Sample sd of β etimates in 1.(b):",beta_sd,"\n")
+
+# (vii) Increase the subcohort size to 300
+beta_results_300 <- matrix(NA, nrow = 500, ncol = 3)
+
+for (i in 1:500) {
+  sample_data <- case_cohort_sample(full_data, subcohort_size = 300)
+  beta_estimates <- apply_weights(sample_data, full_data, subcohort_size = 300)
+  beta_results_300[i, ] <- beta_estimates[, 1]
+}
+# Calculate the esimate of β and its sd
+beta_means_300 <- colMeans(beta_results_300)
+beta_sds_300 <- apply(beta_results_300, 2, sd)
+
+cat("Sample means of β estimates with subcohort size 300:", beta_means_300, "\n")
+cat("Sample standard deviations of β estimates with subcohort size 300:", beta_sds_300, "\n")
+
+#2-(b) NCC
+
+ncc_sample <- function(data, control_size = 1) {
+  cases <- data[data$delta == 1, ]  
+  controls <- data[data$delta == 0, ]  
+  
+  nested_sample <- cases
+  for (i in 1:nrow(cases)) {
+    sampled_controls <- controls[sample(1:nrow(controls), control_size), ]
+    nested_sample <- rbind(nested_sample, sampled_controls)
+  }
+  
+  return(nested_sample)
+}
+
+# Sampling
+nested_sample_data <- ncc_sample(full_data, control_size = 1)
+
+# Estimate β with subcohort size=100
+ncc_beta_estimates_100 <- apply_weights(nested_sample_data, full_data, subcohort_size = 100)
+print(ncc_beta_estimates_100)
+
+# Estimate β with subcohort size=300
+ncc_beta_estimates_300 <- apply_weights(nested_sample_data, full_data, subcohort_size = 300)
+print(ncc_beta_estimates_300)
+
+
+cat("Sample means of β estimates:", ncc_beta_estimates_300[1:3], "\n")
+cat("True means of β:",log(2),log(2),-1,"\n")
+
+
+# Increasing the control size at each failure time to 5
+
+nested_sample_data_5_controls <- ncc_sample(full_data, control_size = 5)
+
+# Estimate β with subcohort size=100
+beta_estimates_nested_5_100 <- apply_weights(nested_sample_data_5_controls, full_data, subcohort_size = 100)
+print(beta_estimates_nested_5_100)
+
+
+# Estimate β with subcohort size=300
+beta_estimates_nested_5_300 <- apply_weights(nested_sample_data_5_controls, full_data, subcohort_size = 300)
+print(beta_estimates_nested_5_300)
+
+
+cat("Sample means of β estimates:", beta_estimates_nested_5_300[1:3], "\n")
+cat("True value of β:",log(2),log(2),-1,"\n")
+
+
+
+#3
+
+censor_rate_0.99 <- 0.90
+param <- 3.14665446 # the 90% censoring rate
+
+# Generating T and C
+generate_data <- function(n) {
+  Z <- mvrnorm(n, mu = c(0, 0), Sigma = matrix(c(1, 0.75, 0.75, 1), 2, 2))
+  Z1 <- Z[,1]
+  Z2 <- Z[,2]
+  W1 <- rnorm(n)
+  W2 <- rbinom(n, 1, 0.5)
+  u <- runif(n)
+  T <- (-log(1 - u) / (exp(beta1 * Z1 + beta2 * W1 + beta3 * W2) * 0.5))^(1 / 1.5)
+  C <- rexp(n, rate = param)
+  X <- pmin(T, C)
+  delta <- as.numeric(T <= C)
+  data.frame(X, delta, Z1, Z2, W1, W2)
+}
+
+#Applying regression model with 3000 times of simulation
+
+n_repeats <- 3000
+n <- 30000
+beta_results <- matrix(NA, nrow = n_repeats, ncol = 3)
+
+
+set.seed(1026)
+
+
+for (i in 1:n_repeats) {
+  # Step 1: 데이터 생성
+  full_data <- generate_data(n)
+  n_total <- nrow(full_data)
+  n_c <- sum(full_data$delta == 0)  # 모집단 내 검열 데이터 수
+  n_failure <- sum(full_data$delta == 1)  # 모집단 내 사건 데이터 수
+  
+  # Step 2: 서브코호트 샘플링
+  sample_data <- case_cohort_sample(full_data, subcohort_size = 100)
+  
+  # Step 3: 서브코호트 기반 회귀 대체법 모델 적합
+  subcohort_failures <- sum(sample_data$delta == 1)  # 서브코호트 내 사건 데이터
+  subcohort_censored <- sum(sample_data$delta == 0)
+  sample_data$weight <- ifelse(sample_data$delta == 1, 1,n_c / subcohort_censored)
+  weighted_model <- lm(Z1 ~ Z2 + W1 + W2 + X, data = sample_data, weights = sample_data$weight)
+  
+  # Step 4: 회귀대체법을 사용하여 결측치 대체
+  non_sample_indices <- setdiff(1:nrow(full_data), as.numeric(rownames(sample_data)))
+  non_sample_data <- full_data[non_sample_indices, ]
+  non_sample_data$Z1 <- NA
+  non_sample_data$Z1[is.na(non_sample_data$Z1)] <- predict(weighted_model, newdata = non_sample_data)
+  
+  # Step 5: 대체된 데이터 합치기
+  full_data_updated <- rbind(sample_data[,-7], non_sample_data)
+  
+  # Step 6: Cox 모델 적합
+  cox_model <- coxph(Surv(X, delta) ~ Z1 + W1 + W2, data = full_data_updated)
+  
+  # Step 7: β 추정치 저장
+  beta_results[i, ] <- coef(cox_model)
+}
+
+# 결과 계산
+beta_means <- colMeans(beta_results)
+beta_sds <- apply(beta_results, 2, sd)
+
+cat("Mean of Beta Estimates:", beta_means, "\n")
+cat("Standard Deviations of Beta Estimates:", beta_sds, "\n")
+cat("True Betas:", log(2), log(2), -1, "\n")
+
+
+
+#Without wight version
+n_repeats <- 3000
+n <- 30000
+beta_results <- matrix(NA, nrow = n_repeats, ncol = 3)
+
+# 반복 외부에서 시드 설정
+set.seed(1026)
+
+
+for (i in 1:n_repeats) {
+  # Step 1: 데이터 생성
+  full_data <- generate_data(n)
+  n_total <- nrow(full_data)
+  n_c <- sum(full_data$delta == 0)  # 모집단 내 검열 데이터 수
+  n_failure <- sum(full_data$delta == 1)  # 모집단 내 사건 데이터 수
+  
+  # Step 2: 서브코호트 샘플링 
+  sample_data <- case_cohort_sample(full_data, subcohort_size = 100)
+  
+  # Step 3: 서브코호트 기반 회귀 대체법 모델 적합
+  subcohort_failures <- sum(sample_data$delta == 1)  # 서브코호트 내 사건 데이터
+  subcohort_censored <- sum(sample_data$delta == 0)
+  weighted_model <- lm(Z1 ~ Z2 + W1 + W2 + X, data = sample_data)
+  
+  # Step 4: 회귀대체법을 사용하여 결측치 대체
+  non_sample_indices <- setdiff(1:nrow(full_data), as.numeric(rownames(sample_data)))
+  non_sample_data <- full_data[non_sample_indices, ]
+  non_sample_data$Z1 <- NA
+  non_sample_data$Z1[is.na(non_sample_data$Z1)] <- predict(weighted_model, newdata = non_sample_data)
+  
+  # Step 5: 대체된 데이터 합치기
+  full_data_updated <- rbind(sample_data[,-7], non_sample_data)
+  
+  # Step 6: Cox 모델 적합
+  cox_model <- coxph(Surv(X, delta) ~ Z1 + W1 + W2, data = full_data_updated)
+  
+  # Step 7: β 추정치 저장
+  beta_results[i, ] <- coef(cox_model)
+}
+
+# 결과 계산
+beta_means <- colMeans(beta_results)
+beta_sds <- apply(beta_results, 2, sd)
+
+cat("Mean of Beta Estimates:", beta_means, "\n")
+cat("Standard Deviations of Beta Estimates:", beta_sds, "\n")
+cat("True Betas:", log(2), log(2), -1, "\n")
+
+# 필요한 패키지 로드
+library(survival)
+library(MASS)
+
+# 데이터 불러오기
+mimic_data <- read.csv("mimic3_final.csv")
+
+mimic_data <- mimic_data[, c("futime", "delta", "Glucose", "Mean.blood.pressure", 
+                             "Oxygen.saturation", "Heart.Rate", 
+                             "Temperature", "Weight","Respiratory.rate")]
+cox_model <- coxph(Surv(futime, delta) ~ Glucose + Heart.Rate + Mean.blood.pressure+Oxygen.saturation+Weight+Temperature+Respiratory.rate, data = mimic_data)
+summary(cox_model)
+# 시뮬레이션 설정
+n_repeats <- 3000  # 반복 횟수
+beta_results <- matrix(NA, nrow = n_repeats, ncol = 7)  # 결과 저장용 행렬
+set.seed(1026)  # 재현성을 위한 시드 설정
+
+# 시뮬레이션 반복
+for (i in 1:n_repeats) {
+  # Step 1: Glucose 일부 결측치 설정 (30%)
+  mimic_data$Glucose <- mimic_data$Glucose  # 원래 값 복원
+  missing_indices <- sample(1:nrow(mimic_data), size = floor(0.3 * nrow(mimic_data)))
+  mimic_data$Glucose[missing_indices] <- NA
+  
+  # Step 2: 서브코호트 생성 (500명 샘플링)
+  subcohort_indices <- sample(which(!is.na(mimic_data$Glucose)), size = 500)
+  subcohort_data <- mimic_data[subcohort_indices, ]
+  
+  # Step 3: 가중치 계산 및 서브코호트 기반 회귀 대체법 모델 적합
+  total_censored <- sum(mimic_data$delta == 0)
+  subcohort_censored <- sum(subcohort_data$delta == 0)
+  subcohort_data$weight <- ifelse(subcohort_data$delta == 1, 1, total_censored / subcohort_censored)
+  
+  weighted_model <- lm(Glucose ~ Mean.blood.pressure + Heart.Rate + Oxygen.saturation + 
+                         Respiratory.rate + Temperature + Weight, 
+                       data = subcohort_data, weights = subcohort_data$weight)
+  
+  # Step 4: 잔차 표준편차 계산 및 결측치 대체
+  residual_sd <- sqrt(mean(weighted_model$residuals^2))
+  mimic_data$Glucose[is.na(mimic_data$Glucose)] <- predict(weighted_model, 
+                                                           newdata = mimic_data[is.na(mimic_data$Glucose), ]) +
+    rnorm(sum(is.na(mimic_data$Glucose)), mean = 0, sd = residual_sd)
+  
+  # Step 5: Cox 모델 적합
+  cox_model <- coxph(Surv(futime, delta) ~ Glucose + Heart.Rate+ Mean.blood.pressure+ 
+                       Oxygen.saturation+ Weight+ Temperature+Respiratory.rate, data = mimic_data)
+  
+  # Step 6: 결과 저장
+  beta_results[i, ] <- coef(cox_model)
+}
+
+# Step 7: 결과 요약
+beta_means <- colMeans(beta_results)
+beta_sds <- apply(beta_results, 2, sd)
+
+cat("Mean of Beta Estimates:", beta_means, "\n")
+cat("Standard Deviations of Beta Estimates:", beta_sds, "\n")
